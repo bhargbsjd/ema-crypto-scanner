@@ -7,7 +7,6 @@ from flask import Flask, render_template_string, jsonify
 
 app = Flask(__name__)
 
-# Headers to prevent Cloudflare/403 blocking on Delta Exchange
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'application/json'
@@ -23,35 +22,56 @@ EMA_FAST = 50
 EMA_MED = 100
 EMA_SLOW = 150
 
-# HIGH PRICE FILTER: Set minimum coin price in USD (e.g. 1.0 = $1, 10.0 = $10, 50.0 = $50)
+# Minimum Coin Price in USD ($1.00+)
 MIN_PRICE = 1.0  
-MAX_WORKERS = 15
+MAX_WORKERS = 8 # Lowered slightly to respect Delta's API rate limits
 
-def get_delta_products():
-    """Fetch all active perpetual futures symbols from Delta Exchange."""
+def get_high_price_perpetuals():
+    """Fetch symbols and immediately filter out cheap coins BEFORE downloading heavy candle data."""
     for base_url in BASE_URLS:
         try:
-            url = f"{base_url}/v2/products"
-            resp = requests.get(url, headers=HEADERS, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                products = data.get('result', [])
+            # 1. Get all Perpetual Futures products
+            prod_url = f"{base_url}/v2/products"
+            prod_resp = requests.get(prod_url, headers=HEADERS, timeout=5)
+            if prod_resp.status_code != 200:
+                continue
+            
+            perpetuals = set()
+            for p in prod_resp.json().get('result', []):
+                if p.get('contract_type') == 'perpetual_futures':
+                    perpetuals.add(p.get('symbol'))
+
+            # 2. Get current prices for ALL coins at once
+            tick_url = f"{base_url}/v2/tickers"
+            tick_resp = requests.get(tick_url, headers=HEADERS, timeout=5)
+            if tick_resp.status_code != 200:
+                continue
                 
-                symbols = []
-                for p in products:
-                    if isinstance(p, dict) and p.get('contract_type') == 'perpetual_futures':
-                        symbols.append(p.get('symbol'))
-                if symbols:
-                    return base_url, symbols
+            high_price_symbols = []
+            for t in tick_resp.json().get('result', []):
+                sym = t.get('symbol')
+                try:
+                    price = float(t.get('close', 0))
+                except (ValueError, TypeError):
+                    price = 0
+                
+                # 3. Keep only perpetuals that are above MIN_PRICE
+                if sym in perpetuals and price >= MIN_PRICE:
+                    high_price_symbols.append(sym)
+                    
+            if high_price_symbols:
+                return base_url, high_price_symbols
+
         except Exception as e:
-            print(f"Error fetching products from {base_url}: {e}")
-    
-    return BASE_URLS[0], ['BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'AVAXUSD', 'BNBUSD', 'LINKUSD', 'NEARUSD']
+            print(f"Error fetching symbols from {base_url}: {e}")
+            
+    # Fallback if both APIs fail
+    return BASE_URLS[0], ['BTCUSD', 'ETHUSD', 'SOLUSD', 'BNBUSD']
 
 def fetch_and_analyze(base_url, symbol):
-    """Fetch candles for a symbol, filter by price, and check for exact EMA crossover."""
+    """Fetch candles for a pre-filtered symbol and check for exact EMA crossover."""
     end_time = int(time.time())
-    start_time = end_time - (250 * 3600)  # Need 250 candles for stable 150 EMA
+    start_time = end_time - (250 * 3600)  
     
     url = f"{base_url}/v2/history/candles"
     params = {
@@ -75,22 +95,15 @@ def fetch_and_analyze(base_url, symbol):
         df = pd.DataFrame(candles)
         df['close'] = df['close'].astype(float)
 
-        curr = df.iloc[-2]  # Most recently closed candle
-        prev = df.iloc[-3]  # Previous candle
-        
-        curr_price = float(curr['close'])
-
-        # PRICE FILTER: Discard low-priced coins
-        if curr_price < MIN_PRICE:
-            return None
+        curr_price = float(df.iloc[-2]['close'])
 
         # Triple EMA Calculations
         df['EMA_50'] = df['close'].ewm(span=EMA_FAST, adjust=False).mean()
         df['EMA_100'] = df['close'].ewm(span=EMA_MED, adjust=False).mean()
         df['EMA_150'] = df['close'].ewm(span=EMA_SLOW, adjust=False).mean()
 
-        curr = df.iloc[-2]
-        prev = df.iloc[-3]
+        curr = df.iloc[-2]  # Last closed candle
+        prev = df.iloc[-3]  # Previous candle
 
         # Alignment Checks
         curr_bullish = (curr['EMA_50'] > curr['EMA_100']) and (curr['EMA_100'] > curr['EMA_150'])
@@ -106,7 +119,6 @@ def fetch_and_analyze(base_url, symbol):
         elif curr_bearish and not prev_bearish:
             signal = "SHORT"
 
-        # Return only fresh crossovers on high-priced coins
         if signal is not None:
             return {
                 'symbol': symbol,
@@ -117,7 +129,7 @@ def fetch_and_analyze(base_url, symbol):
                 'signal': signal
             }
 
-    except Exception as e:
+    except Exception:
         pass
         
     return None
@@ -192,14 +204,26 @@ HTML_TEMPLATE = """
             btn.innerText = 'Scanning High Price Coins...';
             btn.disabled = true;
             btn.classList.add('opacity-50');
-            tbody.innerHTML = '<tr><td colspan="4" class="p-6 text-center text-blue-400 animate-pulse">Scanning high-price perpetuals on Delta Exchange...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="4" class="p-6 text-center text-blue-400 animate-pulse">Filtering out cheap coins and scanning EMA data...</td></tr>';
 
             try {
                 const response = await fetch('/api/scan');
-                const result = await response.json();
+                
+                // Better error handling to catch non-JSON (like timeout pages)
+                if (!response.ok) {
+                    throw new Error(`Server returned status: ${response.status}. The server might have timed out.`);
+                }
+                
+                const textData = await response.text();
+                let result;
+                try {
+                    result = JSON.parse(textData);
+                } catch (e) {
+                    throw new Error("Server did not return valid data. It likely took too long and timed out.");
+                }
                 
                 if (result.status !== 'success') {
-                    throw new Error(result.message || 'Error occurred');
+                    throw new Error(result.message || 'Unknown backend error occurred');
                 }
 
                 document.getElementById('signalsFound').innerText = result.data.length;
@@ -232,8 +256,8 @@ HTML_TEMPLATE = """
                 });
                 
             } catch (error) {
-                tbody.innerHTML = `<tr><td colspan="4" class="p-6 text-center text-red-500">Error: ${error.message}</td></tr>`;
-                console.error(error);
+                tbody.innerHTML = `<tr><td colspan="4" class="p-6 text-center text-red-500 font-bold">Error: ${error.message}</td></tr>`;
+                console.error("Scan Failed:", error);
             } finally {
                 btn.innerText = 'Scan High Price Perpetuals';
                 btn.disabled = false;
@@ -255,11 +279,12 @@ def home():
 @app.route('/api/scan')
 def scan():
     try:
-        base_url, symbols = get_delta_products()
-        symbols = symbols[:100]
+        # Pre-filter: only get symbols that are ALREADY >= $1.00
+        base_url, symbols = get_high_price_perpetuals()
         
         matches = []
         
+        # Parallel processing for only the expensive coins
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             future_to_symbol = {executor.submit(fetch_and_analyze, base_url, s): s for s in symbols}
             for future in as_completed(future_to_symbol):
@@ -267,7 +292,7 @@ def scan():
                 if res:
                     matches.append(res)
             
-        # SORT BY PRICE DESCENDING (Highest priced coins at the top)
+        # Sort by Price Descending
         matches.sort(key=lambda x: x['price'], reverse=True)
 
         return jsonify({
@@ -276,7 +301,7 @@ def scan():
             'data': matches
         })
     except Exception as e:
-        print(f"Scan error: {e}")
+        print(f"Server Route Error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 if __name__ == '__main__':
