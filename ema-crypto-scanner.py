@@ -67,7 +67,7 @@ def fetch_candles(base_url, symbol):
     return []
 
 def calculate_emas_and_signals(candles):
-    """Calculates EMA 50, 100, 150 and applies your Pine Script rules."""
+    """Calculates EMA 50, 100, 150 and applies crossover rules."""
     if len(candles) < EMA_SLOW + 5:
         return None
 
@@ -150,6 +150,18 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
+        <!-- SEARCH BAR CONTROLS -->
+        <div class="flex gap-2 mb-4">
+            <input type="text" id="searchInput" onkeyup="filterTable()" placeholder="Search contract symbol (e.g. BTC, SOL, ETH)..." 
+                   class="bg-[#1e222d] border border-[#434651] text-white px-4 py-2 rounded focus:outline-none focus:border-blue-500 flex-1">
+            <button onclick="filterTable()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-5 rounded transition-colors">
+                Search
+            </button>
+            <button onclick="clearSearch()" class="bg-gray-700 hover:bg-gray-600 text-white font-semibold py-2 px-4 rounded transition-colors">
+                Clear
+            </button>
+        </div>
+
         <div class="card rounded overflow-hidden">
             <table class="w-full text-left border-collapse">
                 <thead>
@@ -171,6 +183,49 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
+        let allScannedData = [];
+
+        function renderTable(data) {
+            const tbody = document.getElementById('resultsBody');
+            tbody.innerHTML = '';
+            
+            if (!data || data.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="p-6 text-center text-gray-400">No matching contracts found.</td></tr>';
+                return;
+            }
+
+            data.forEach(coin => {
+                let trendColor = coin.trend === 'Strong Bullish' ? 'text-green-500 font-bold' : (coin.trend === 'Strong Bearish' ? 'text-red-500 font-bold' : 'text-gray-400');
+                let signalHtml = coin.signal === 'LONG' ? '<span class="bg-green-600/20 text-green-400 px-3 py-1 rounded font-bold border border-green-500/30">🟢 LONG SIGNAL</span>' : 
+                                (coin.signal === 'SHORT' ? '<span class="bg-red-600/20 text-red-400 px-3 py-1 rounded font-bold border border-red-500/30">🔴 SHORT SIGNAL</span>' : '<span class="text-gray-600">-</span>');
+
+                tbody.innerHTML += `
+                    <tr class="border-b border-[#434651] hover:bg-[#2a2e39] transition-colors">
+                        <td class="p-3 font-bold text-white">${coin.symbol}</td>
+                        <td class="p-3 font-mono text-gray-200">${coin.price}</td>
+                        <td class="p-3 text-xs font-mono text-gray-400">${coin.ema50} / ${coin.ema100} / ${coin.ema150}</td>
+                        <td class="p-3 ${trendColor}">${coin.trend}</td>
+                        <td class="p-3">${signalHtml}</td>
+                    </tr>
+                `;
+            });
+        }
+
+        function filterTable() {
+            const query = document.getElementById('searchInput').value.trim().toUpperCase();
+            if (!query) {
+                renderTable(allScannedData);
+                return;
+            }
+            const filtered = allScannedData.filter(coin => coin.symbol.toUpperCase().includes(query));
+            renderTable(filtered);
+        }
+
+        function clearSearch() {
+            document.getElementById('searchInput').value = '';
+            renderTable(allScannedData);
+        }
+
         async function runScan() {
             const btn = document.getElementById('scanBtn');
             const tbody = document.getElementById('resultsBody');
@@ -188,35 +243,13 @@ HTML_TEMPLATE = """
                     throw new Error(result.message || 'Error occurred');
                 }
 
+                allScannedData = result.data || [];
                 document.getElementById('marketsScanned').innerText = result.scanned_count;
                 
-                let signalsCount = 0;
-                tbody.innerHTML = '';
-                
-                if (!result.data || result.data.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="5" class="p-6 text-center text-yellow-400">No data returned. Try scanning again.</td></tr>';
-                    return;
-                }
-
-                result.data.forEach(coin => {
-                    if (coin.signal !== 'None') signalsCount++;
-                    
-                    let trendColor = coin.trend === 'Strong Bullish' ? 'text-green-500 font-bold' : (coin.trend === 'Strong Bearish' ? 'text-red-500 font-bold' : 'text-gray-400');
-                    let signalHtml = coin.signal === 'LONG' ? '<span class="bg-green-600/20 text-green-400 px-3 py-1 rounded font-bold border border-green-500/30">🟢 LONG SIGNAL</span>' : 
-                                    (coin.signal === 'SHORT' ? '<span class="bg-red-600/20 text-red-400 px-3 py-1 rounded font-bold border border-red-500/30">🔴 SHORT SIGNAL</span>' : '<span class="text-gray-600">-</span>');
-
-                    tbody.innerHTML += `
-                        <tr class="border-b border-[#434651] hover:bg-[#2a2e39] transition-colors">
-                            <td class="p-3 font-bold text-white">${coin.symbol}</td>
-                            <td class="p-3 font-mono text-gray-200">${coin.price}</td>
-                            <td class="p-3 text-xs font-mono text-gray-400">${coin.ema50} / ${coin.ema100} / ${coin.ema150}</td>
-                            <td class="p-3 ${trendColor}">${coin.trend}</td>
-                            <td class="p-3">${signalHtml}</td>
-                        </tr>
-                    `;
-                });
-                
+                let signalsCount = allScannedData.filter(c => c.signal !== 'None').length;
                 document.getElementById('signalsFound').innerText = signalsCount;
+                
+                filterTable();
                 
             } catch (error) {
                 tbody.innerHTML = `<tr><td colspan="5" class="p-6 text-center text-red-500">Error: ${error.message}</td></tr>`;
@@ -243,7 +276,7 @@ def home():
 def scan():
     try:
         base_url, symbols = get_delta_products()
-        # Top 30 perpetual contracts for fast execution on free cloud servers
+        # Top 30 perpetual contracts for fast execution
         symbols = symbols[:30]
         
         results = []
