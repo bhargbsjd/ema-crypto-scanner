@@ -46,7 +46,7 @@ def get_delta_products():
 def fetch_candles(base_url, symbol):
     """Fetch 30m OHLCV candles from Delta Exchange."""
     end_time = int(time.time())
-    start_time = end_time - (300 * 1800)  # Fetch 300 candles (30m each = 1800s) to accurately calculate EMA 150
+    start_time = end_time - (300 * 1800)  # Fetch 300 candles (30m each)
     
     url = f"{base_url}/v2/history/candles"
     params = {
@@ -66,9 +66,9 @@ def fetch_candles(base_url, symbol):
         print(f"Error fetching candles for {symbol}: {e}")
     return []
 
-def calculate_emas_and_signals(candles):
-    """Calculates EMA 50, 100, 150 and applies crossover rules."""
-    if len(candles) < EMA_SLOW + 5:
+def calculate_emas_and_signals(candles, lookback=3):
+    """Calculates EMA 50, 100, 150 and applies crossover rules (including early fast moves)."""
+    if len(candles) < EMA_SLOW + 10:
         return None
 
     df = pd.DataFrame(candles)
@@ -79,24 +79,48 @@ def calculate_emas_and_signals(candles):
     df['EMA_100'] = df['close'].ewm(span=EMA_MED, adjust=False).mean()
     df['EMA_150'] = df['close'].ewm(span=EMA_SLOW, adjust=False).mean()
 
+    # 1. Full 3-EMA Stacking (Strong)
+    df['full_bullish'] = (df['EMA_50'] > df['EMA_100']) & (df['EMA_100'] > df['EMA_150'])
+    df['full_bearish'] = (df['EMA_50'] < df['EMA_100']) & (df['EMA_100'] < df['EMA_150'])
+
+    # 2. Fast/Early Alignment (Fast EMA crosses both medium and slow EMAs)
+    df['fast_bullish'] = (df['EMA_50'] > df['EMA_100']) & (df['EMA_50'] > df['EMA_150'])
+    df['fast_bearish'] = (df['EMA_50'] < df['EMA_100']) & (df['EMA_50'] < df['EMA_150'])
+
     curr = df.iloc[-2]  # Most recently closed candle
-    prev = df.iloc[-3]  # Previous candle
 
-    # Alignment Rules
-    curr_bullish = (curr['EMA_50'] > curr['EMA_100']) and (curr['EMA_100'] > curr['EMA_150'])
-    curr_bearish = (curr['EMA_50'] < curr['EMA_100']) and (curr['EMA_100'] < curr['EMA_150'])
+    # Trend determination
+    if curr['full_bullish']:
+        trend_text = "Strong Bullish"
+    elif curr['full_bearish']:
+        trend_text = "Strong Bearish"
+    elif curr['fast_bullish']:
+        trend_text = "Early Bullish"
+    elif curr['fast_bearish']:
+        trend_text = "Early Bearish"
+    else:
+        trend_text = "Neutral"
 
-    prev_bullish = (prev['EMA_50'] > prev['EMA_100']) and (prev['EMA_100'] > prev['EMA_150'])
-    prev_bearish = (prev['EMA_50'] < prev['EMA_100']) and (prev['EMA_100'] < prev['EMA_150'])
-
-    trend_text = "Strong Bullish" if curr_bullish else ("Strong Bearish" if curr_bearish else "Neutral")
-
-    # Crossover Signals
+    # Signal Check with lookback window
     signal = "None"
-    if curr_bullish and not prev_bullish:
-        signal = "LONG"
-    elif curr_bearish and not prev_bearish:
-        signal = "SHORT"
+    for i in range(2, 2 + lookback):
+        c_curr = df.iloc[-i]
+        c_prev = df.iloc[-(i + 1)]
+
+        # Strong Crossovers
+        if c_curr['full_bullish'] and not c_prev['full_bullish']:
+            signal = "LONG (Strong)"
+            break
+        elif c_curr['full_bearish'] and not c_prev['full_bearish']:
+            signal = "SHORT (Strong)"
+            break
+        # Fast / Quick Crossovers (Catches sudden drops/spikes)
+        elif c_curr['fast_bullish'] and not c_prev['fast_bullish']:
+            signal = "LONG (Early/Fast)"
+            break
+        elif c_curr['fast_bearish'] and not c_prev['fast_bearish']:
+            signal = "SHORT (Early/Fast)"
+            break
 
     return {
         'price': round(float(curr['close']), 4),
@@ -128,7 +152,7 @@ HTML_TEMPLATE = """
         <div class="flex justify-between items-center mb-8">
             <div>
                 <h1 class="text-3xl font-bold text-white">Delta Exchange Scanner</h1>
-                <p class="text-sm text-gray-400 mt-1">30m Timeframe | Triple EMA (50/100/150) Crossover Strategy</p>
+                <p class="text-sm text-gray-400 mt-1">30m Timeframe | Fast & Strong EMA Crossover Strategy</p>
             </div>
             <button id="scanBtn" onclick="runScan()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded transition-colors shadow-lg">
                 Scan Delta Perpetuals
@@ -195,9 +219,9 @@ HTML_TEMPLATE = """
             }
 
             data.forEach(coin => {
-                let trendColor = coin.trend === 'Strong Bullish' ? 'text-green-500 font-bold' : (coin.trend === 'Strong Bearish' ? 'text-red-500 font-bold' : 'text-gray-400');
-                let signalHtml = coin.signal === 'LONG' ? '<span class="bg-green-600/20 text-green-400 px-3 py-1 rounded font-bold border border-green-500/30">🟢 LONG SIGNAL</span>' : 
-                                (coin.signal === 'SHORT' ? '<span class="bg-red-600/20 text-red-400 px-3 py-1 rounded font-bold border border-red-500/30">🔴 SHORT SIGNAL</span>' : '<span class="text-gray-600">-</span>');
+                let trendColor = coin.trend.includes('Bullish') ? 'text-green-500 font-bold' : (coin.trend.includes('Bearish') ? 'text-red-500 font-bold' : 'text-gray-400');
+                let signalHtml = coin.signal.includes('LONG') ? `<span class="bg-green-600/20 text-green-400 px-3 py-1 rounded font-bold border border-green-500/30">🟢 ${coin.signal}</span>` : 
+                                (coin.signal.includes('SHORT') ? `<span class="bg-red-600/20 text-red-400 px-3 py-1 rounded font-bold border border-red-500/30">🔴 ${coin.signal}</span>` : '<span class="text-gray-600">-</span>');
 
                 tbody.innerHTML += `
                     <tr class="border-b border-[#434651] hover:bg-[#2a2e39] transition-colors">
@@ -230,17 +254,26 @@ HTML_TEMPLATE = """
             const btn = document.getElementById('scanBtn');
             const tbody = document.getElementById('resultsBody');
             
-            btn.innerText = 'Scanning Up to 200 Coins...';
+            btn.innerText = 'Scanning Delta Exchange...';
             btn.disabled = true;
             btn.classList.add('opacity-50');
-            tbody.innerHTML = '<tr><td colspan="5" class="p-6 text-center text-blue-400 animate-pulse">Fetching 30m candles for up to 200 perpetuals from Delta Exchange...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="5" class="p-6 text-center text-blue-400 animate-pulse">Fetching 30m candles from Delta Exchange...</td></tr>';
 
             try {
                 const response = await fetch('/api/scan');
+                
+                // Check if the server actually sent JSON before trying to parse it
+                const contentType = response.headers.get("content-type");
+                if (!contentType || !contentType.includes("application/json")) {
+                    const textResult = await response.text();
+                    console.error("Server returned HTML instead of JSON:", textResult);
+                    throw new Error("Server crashed or returned an HTML page. Check your Python terminal for the real error.");
+                }
+
                 const result = await response.json();
                 
                 if (result.status !== 'success') {
-                    throw new Error(result.message || 'Error occurred');
+                    throw new Error(result.message || 'Error occurred during scan');
                 }
 
                 allScannedData = result.data || [];
@@ -252,7 +285,7 @@ HTML_TEMPLATE = """
                 filterTable();
                 
             } catch (error) {
-                tbody.innerHTML = `<tr><td colspan="5" class="p-6 text-center text-red-500">Error: ${error.message}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="5" class="p-6 text-center text-red-500 font-bold">Error: ${error.message}</td></tr>`;
                 console.error(error);
             } finally {
                 btn.innerText = 'Scan Delta Perpetuals';
@@ -276,8 +309,8 @@ def home():
 def scan():
     try:
         base_url, symbols = get_delta_products()
-        # Scan up to 200 perpetual contracts
-        symbols = symbols[:200]
+        # Top 30 perpetual contracts for fast execution
+        symbols = symbols[:30]
         
         results = []
         for sym in symbols:
@@ -297,11 +330,11 @@ def scan():
                     'signal': analysis['signal']
                 })
         
-        # Sort: Active Crossovers first, then Strong Trends, then Neutral
+        # Sort: Active Crossovers first, then Strong/Early Trends, then Neutral
         def sort_key(item):
             if item['signal'] != 'None':
                 return 0
-            if item['trend'] != 'Neutral':
+            if 'Bullish' in item['trend'] or 'Bearish' in item['trend']:
                 return 1
             return 2
 
