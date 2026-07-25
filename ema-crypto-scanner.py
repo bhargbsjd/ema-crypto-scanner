@@ -44,13 +44,13 @@ def get_delta_products():
     return BASE_URLS[0], ['BTCUSD', 'ETHUSD', 'SOLUSD', 'XRPUSD', 'AVAXUSD', 'DOGEUSD', 'BNBUSD', 'LINKUSD', 'NEARUSD']
 
 def fetch_candles(base_url, symbol):
-    """Fetch 1h OHLCV candles from Delta Exchange."""
+    """Fetch 30m OHLCV candles from Delta Exchange."""
     end_time = int(time.time())
-    start_time = end_time - (250 * 3600)  # Fetch 250 candles to accurately calculate EMA 150
+    start_time = end_time - (300 * 1800)  # Fetch 300 candles (30m each = 1800s) to accurately calculate EMA 150
     
     url = f"{base_url}/v2/history/candles"
     params = {
-        'resolution': '1h',
+        'resolution': '30m',
         'symbol': symbol,
         'start': start_time,
         'end': end_time
@@ -116,7 +116,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Delta Exchange - Triple EMA Dashboard</title>
+    <title>Delta Exchange - 30m Triple EMA Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { background-color: #131722; color: #d1d4dc; }
@@ -128,7 +128,7 @@ HTML_TEMPLATE = """
         <div class="flex justify-between items-center mb-8">
             <div>
                 <h1 class="text-3xl font-bold text-white">Delta Exchange Scanner</h1>
-                <p class="text-sm text-gray-400 mt-1">Triple EMA (50/100/150) Crossover Strategy</p>
+                <p class="text-sm text-gray-400 mt-1">30m Timeframe | Triple EMA (50/100/150) Crossover Strategy</p>
             </div>
             <button id="scanBtn" onclick="runScan()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded transition-colors shadow-lg">
                 Scan Delta Perpetuals
@@ -138,7 +138,7 @@ HTML_TEMPLATE = """
         <div class="grid grid-cols-3 gap-4 mb-8">
             <div class="card p-4 rounded text-center">
                 <h3 class="text-sm text-gray-400">Settings</h3>
-                <p class="text-lg font-semibold text-white">1h | EMA 50/100/150</p>
+                <p class="text-lg font-semibold text-white">30m | EMA 50/100/150</p>
             </div>
             <div class="card p-4 rounded text-center">
                 <h3 class="text-sm text-gray-400">Perpetuals Scanned</h3>
@@ -233,7 +233,7 @@ HTML_TEMPLATE = """
             btn.innerText = 'Scanning Delta Exchange...';
             btn.disabled = true;
             btn.classList.add('opacity-50');
-            tbody.innerHTML = '<tr><td colspan="5" class="p-6 text-center text-blue-400 animate-pulse">Fetching live candles from Delta Exchange...</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="5" class="p-6 text-center text-blue-400 animate-pulse">Fetching 30m candles from Delta Exchange...</td></tr>';
 
             try {
                 const response = await fetch('/api/scan');
