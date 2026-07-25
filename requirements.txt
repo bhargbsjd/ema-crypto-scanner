@@ -1,0 +1,5 @@
+Flask
+ccxt
+pandas
+requests
+gunicorn
